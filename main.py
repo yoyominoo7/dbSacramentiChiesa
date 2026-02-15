@@ -1168,10 +1168,23 @@ def main():
         name="weekly_report",
     )
 
-    # Avvio del bot
-    application.run_polling()
+    # -------------------------
+    # 🔥 AVVIO WEBHOOK PER RENDER
+    # -------------------------
+    import os
+
+    port = int(os.environ.get("PORT", 10000))
+    webhook_url = os.environ.get("WEBHOOK_URL")
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TOKEN,
+        webhook_url=f"{webhook_url}/{TOKEN}",
+    )
 
 
 if __name__ == "__main__":
     main()
+
 
