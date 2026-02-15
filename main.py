@@ -277,7 +277,6 @@ def list_pagination_keyboard(base_cb: str, page: int, total_pages: int):
     )
     return InlineKeyboardMarkup(buttons)
 
-
 # ---------- /registra ----------
 
 async def registra_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,7 +343,8 @@ async def registra_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["reg_msg_id"] = msg.message_id
 
     return REG_SACRAMENTS
-    
+
+
 async def registra_sacrament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -423,6 +423,144 @@ async def registra_sacrament_callback(update: Update, context: ContextTypes.DEFA
     )
 
     return REG_SACRAMENTS
+
+
+async def registra_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_priest(user.id):
+        return ConversationHandler.END
+
+    notes = update.message.text.strip()
+    if notes.lower() == "no":
+        notes = None
+
+    context.user_data["reg_notes"] = notes
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    await send_registra_summary(update, context)
+    return REG_CONFIRM
+
+
+async def send_registra_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    nickname = context.user_data.get("reg_nick", "Sconosciuto")
+    sacrs = context.user_data.get("reg_sacraments", [])
+    notes = context.user_data.get("reg_notes")
+
+    sacrs_str = ", ".join(sacrs) if sacrs else "Nessuno"
+    notes_str = notes if notes else "Nessuna nota."
+
+    text = (
+        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
+        "📜 Resoconto della registrazione:\n\n"
+        f"👤 Fedele: {nickname}\n"
+        f"✝️ Sacramenti: {sacrs_str}\n"
+        f"🕯 Note: {notes_str}\n\n"
+        "Confermi questa registrazione?"
+    )
+
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Conferma", callback_data="reg_conf_yes"),
+                InlineKeyboardButton("❌ Annulla", callback_data="reg_conf_no"),
+            ]
+        ]
+    )
+
+    reg_msg_id = context.user_data.get("reg_msg_id")
+    chat_id = update.effective_chat.id
+
+    if update.callback_query:
+        await context.bot.edit_message_text(
+            chat_id=update.callback_query.message.chat_id,
+            message_id=update.callback_query.message.message_id,
+            text=text,
+            reply_markup=kb,
+        )
+    elif reg_msg_id:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=reg_msg_id,
+            text=text,
+            reply_markup=kb,
+        )
+    else:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+        )
+        context.user_data["reg_msg_id"] = msg.message_id
+
+
+async def registra_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+
+    if not is_priest(user.id):
+        return ConversationHandler.END
+
+    data = query.data
+
+    # --- Annulla ---
+    if data == "reg_conf_no":
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text="🕯 La registrazione è stata annullata. Nessun sacramento è stato registrato.",
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # --- Conferma ---
+    nickname = context.user_data.get("reg_nick", "Sconosciuto")
+    sacrs = context.user_data.get("reg_sacraments", [])
+    notes = context.user_data.get("reg_notes")
+    priest_username = user.username
+
+    sacrs_str = ", ".join(sacrs) if sacrs else "Nessuno"
+    notes_str = notes if notes else "Nessuna nota."
+
+    direction_text = (
+        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
+        "📜 Nuova registrazione di sacramento\n\n"
+        f"👤 Fedele: {nickname}\n"
+        f"✝️ Sacramenti: {sacrs_str}\n"
+        f"🕯 Note: {notes_str}\n"
+        f"🙏 Registrato da: @{priest_username}" if priest_username else ""
+    )
+
+    direction_msg = None
+    if DIRECTION_CHAT_ID != 0:
+        direction_msg = await context.bot.send_message(
+            chat_id=DIRECTION_CHAT_ID,
+            text=direction_text
+        )
+
+    await save_sacrament(
+        faithful_nickname=nickname,
+        sacraments=sacrs,
+        notes=notes,
+        priest_id=user.id,
+        priest_username=user.username,
+        direction_chat_id=DIRECTION_CHAT_ID if DIRECTION_CHAT_ID != 0 else None,
+        direction_message_id=direction_msg.message_id if direction_msg else None,
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id,
+        text="🕯 La registrazione è stata confermata e inviata alla Direzione.",
+    )
+
+    context.user_data.clear()
+    return ConversationHandler.END
 
 # ---------- /sessione ----------
 
