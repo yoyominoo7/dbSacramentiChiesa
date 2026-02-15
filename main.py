@@ -568,9 +568,18 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
+    # Solo sacerdoti e solo nella chat STAFF
     if not is_priest(user.id):
         return
     if chat.id != STAFF_CHAT_ID:
+        return
+
+    # 🔥 CONTROLLO NUOVO: impedisce sessioni multiple
+    if any(SESSIONS.values()):
+        await update.message.reply_text(
+            "🕯 Una sessione sacerdotale è già attiva.\n"
+            "Non è possibile avviarne un’altra finché quella corrente non termina."
+        )
         return
 
     # Salva/aggiorna username del sacerdote
@@ -749,6 +758,7 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
             session["priests"].add(user.id)
             if user.id not in session["in_turn"]:
                 session["waiting"].add(user.id)
+                session["priests"].add(user.id)
             await query.answer("Ti sei messo in lista per i turni.")
 
         elif query.data == "turn_leave":
@@ -759,6 +769,7 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
                     session["in_turn"].add(new_priest)
             if user.id in session["waiting"]:
                 session["waiting"].discard(user.id)
+                session["priests"].discard(user.id)
             await query.answer("Hai lasciato i turni.")
 
         if len(session["priests"]) < 3:
