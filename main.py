@@ -914,15 +914,15 @@ async def lista_by_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         sac_id = int(text)
     except ValueError:
         await update.message.reply_text("🕯 L'ID deve essere un numero. Riprova.")
-        return LIST_BY_ID
+        return ConversationHandler.END
+
 
     row = await fetch_sacrament_by_id(sac_id)
     if not row:
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata con questo ID."
         )
-        return LIST_BY_ID
-
+        return ConversationHandler.END
     msg = format_sacrament_record(row)
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🏛 Torna al pannello principale", callback_data="list_main")]]
@@ -945,7 +945,8 @@ async def lista_by_faithful_message(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata per questo fedele."
         )
-        return LIST_BY_FAITHFUL
+        return ConversationHandler.END
+
 
     lines = []
     for r in rows:
