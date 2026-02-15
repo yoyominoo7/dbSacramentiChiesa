@@ -30,14 +30,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("BOT_TOKEN", "INSERISCI_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@host/db")
+TOKEN = os.getenv("BOT_TOKEN", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# Chat IDs (da impostare)
 DIRECTION_CHAT_ID = int(os.getenv("DIRECTION_CHAT_ID", "0"))
 STAFF_CHAT_ID = int(os.getenv("STAFF_CHAT_ID", "0"))
 
-# Ruoli: puoi gestirli via DB o env; qui semplice lista di ID
 PRIESTS_IDS = set(
     int(x) for x in os.getenv("PRIESTS_IDS", "").split(",") if x.strip()
 )
@@ -45,7 +43,6 @@ DIRECTION_IDS = set(
     int(x) for x in os.getenv("DIRECTION_IDS", "").split(",") if x.strip()
 )
 
-# Sacramenti
 SACRAMENTS = [
     "battesimo",
     "cammino dell abisso",
@@ -55,25 +52,52 @@ SACRAMENTS = [
     "matrimonio",
     "divorzio",
 ]
-
 MARRIAGE_DIVORCE = {"matrimonio", "divorzio"}
 
-# --- STATES /registra ---
 REG_NICK, REG_SACRAMENTS, REG_NOTES, REG_CONFIRM = range(4)
-
-# --- STATES /lista_sacramenti ---
 LIST_MAIN, LIST_BY_PRIEST, LIST_BY_ID, LIST_BY_FAITHFUL = range(10, 14)
 
-# In-memory sessione turni
-SESSIONS: Dict[int, Dict[str, Any]] = {}  # key: message_id
+SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 
-# ---------- UTILS DB ----------
+# ---------- DB UTILS ----------
 
 async def get_db_pool():
     if not hasattr(get_db_pool, "pool"):
         get_db_pool.pool = await asyncpg.create_pool(DATABASE_URL)
     return get_db_pool.pool
+
+
+async def upsert_priest(user):
+    """Salva o aggiorna username e nome del sacerdote."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO priests (telegram_id, username, display_name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (telegram_id)
+            DO UPDATE SET username = EXCLUDED.username, display_name = EXCLUDED.display_name
+            """,
+            user.id,
+            user.username,
+            user.full_name,
+        )
+
+
+async def get_priest_name(telegram_id: int) -> str:
+    """Restituisce @username oppure display_name se non esiste username."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT username, display_name FROM priests WHERE telegram_id = $1",
+            telegram_id,
+        )
+    if not row:
+        return f"ID {telegram_id}"
+    if row["username"]:
+        return f"@{row['username']}"
+    return row["display_name"]
 
 
 async def save_sacrament(
@@ -82,7 +106,7 @@ async def save_sacrament(
     notes: str | None,
     priest_id: int,
     priest_username: str | None,
-    direction_chat_id: int,
+    direction_chat_id: int | None,
     direction_message_id: int | None,
 ):
     pool = await get_db_pool()
@@ -103,12 +127,10 @@ async def save_sacrament(
         )
 
 
-async def fetch_sacraments_by_priest(
-    priest_id: int, offset: int, limit: int
-) -> List[asyncpg.Record]:
+async def fetch_sacraments_by_priest(priest_id: int, offset: int, limit: int):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        return await conn.fetch(
             """
             SELECT * FROM sacraments
             WHERE priest_telegram_id = $1
@@ -119,7 +141,6 @@ async def fetch_sacraments_by_priest(
             offset,
             limit,
         )
-    return rows
 
 
 async def count_sacraments_by_priest(priest_id: int) -> int:
@@ -132,22 +153,19 @@ async def count_sacraments_by_priest(priest_id: int) -> int:
     return row["c"] if row else 0
 
 
-async def fetch_sacrament_by_id(sacrament_id: int) -> asyncpg.Record | None:
+async def fetch_sacrament_by_id(sacrament_id: int):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
+        return await conn.fetchrow(
             "SELECT * FROM sacraments WHERE id = $1",
             sacrament_id,
         )
-    return row
 
 
-async def fetch_sacraments_by_faithful(
-    faithful: str, offset: int, limit: int
-) -> List[asyncpg.Record]:
+async def fetch_sacraments_by_faithful(faithful: str, offset: int, limit: int):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        return await conn.fetch(
             """
             SELECT * FROM sacraments
             WHERE LOWER(faithful_nickname) LIKE LOWER($1)
@@ -158,7 +176,6 @@ async def fetch_sacraments_by_faithful(
             offset,
             limit,
         )
-    return rows
 
 
 async def count_sacraments_by_faithful(faithful: str) -> int:
@@ -174,23 +191,22 @@ async def count_sacraments_by_faithful(faithful: str) -> int:
     return row["c"] if row else 0
 
 
-async def fetch_all_priests_from_sacraments() -> List[asyncpg.Record]:
+async def fetch_all_priests_from_sacraments():
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        return await conn.fetch(
             """
             SELECT DISTINCT priest_telegram_id, priest_username
             FROM sacraments
             ORDER BY priest_username NULLS LAST
             """
         )
-    return rows
 
 
-async def fetch_weekly_report(start: datetime, end: datetime) -> List[asyncpg.Record]:
+async def fetch_weekly_report(start: datetime, end: datetime):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        return await conn.fetch(
             """
             SELECT *
             FROM sacraments
@@ -199,7 +215,6 @@ async def fetch_weekly_report(start: datetime, end: datetime) -> List[asyncpg.Re
             start,
             end,
         )
-    return rows
 
 
 # ---------- HELPERS ----------
@@ -212,13 +227,7 @@ def is_direction(user_id: int) -> bool:
     return user_id in DIRECTION_IDS
 
 
-def format_username(user) -> str:
-    if user.username:
-        return f"@{user.username}"
-    return user.full_name
-
-
-def format_sacrament_record(row: asyncpg.Record) -> str:
+def format_sacrament_record(row) -> str:
     created_at: datetime = row["created_at"]
     created_at_str = created_at.astimezone(timezone.utc).strftime("%d:%m:%Y %H:%M")
     sacrs = ", ".join(row["sacraments"])
@@ -238,7 +247,6 @@ def sacrament_keyboard(selected: List[str]) -> InlineKeyboardMarkup:
     buttons = []
     row = []
     for s in SACRAMENTS:
-        # logica matrimonio/divorzio
         if selected:
             if selected[0] in MARRIAGE_DIVORCE and s != selected[0]:
                 continue
@@ -255,9 +263,7 @@ def sacrament_keyboard(selected: List[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def list_pagination_keyboard(
-    base_cb: str, page: int, total_pages: int
-) -> InlineKeyboardMarkup:
+def list_pagination_keyboard(base_cb: str, page: int, total_pages: int):
     buttons = []
     nav = []
     if page > 0:
@@ -310,201 +316,34 @@ async def registra_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    chat = update.effective_chat
+    bot = context.bot
+    chat_id = update.effective_chat.id
     reg_msg_id = context.user_data.get("reg_msg_id")
-    text = (
-        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
-        f"👤 Fedele: {nickname}\n\n"
-        "✝️ Seleziona i sacramenti da registrare.\n"
-        "Puoi sceglierne più di uno. Quando hai terminato, premi «Fine»."
-    )
-    kb = sacrament_keyboard([])
-    if reg_msg_id:
-        await chat.edit_message_text(
-            text=text, message_id=reg_msg_id, reply_markup=kb
-        )
-    else:
-        msg = await chat.send_message(text, reply_markup=kb)
-        context.user_data["reg_msg_id"] = msg.message_id
 
-    return REG_SACRAMENTS
-
-
-async def registra_sacrament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    if not is_priest(user.id):
-        return ConversationHandler.END
-
-    data = query.data
-    if data == "sacr_fine":
-        selected = context.user_data.get("reg_sacraments", [])
-        if not selected:
-            await query.answer("Seleziona almeno un sacramento.", show_alert=True)
-            return REG_SACRAMENTS
-
-        # Se matrimonio o divorzio, passiamo alle note
-        if selected[0] in MARRIAGE_DIVORCE:
-            text = (
-                "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
-                "🕯 Aggiungi eventuali note per questa registrazione.\n"
-                "Se non ci sono note, scrivi «no»."
-            )
-            await query.edit_message_text(text=text)
-            return REG_NOTES
-        else:
-            # Nessuna nota, passiamo direttamente al resoconto
-            context.user_data["reg_notes"] = None
-            await send_registra_summary(update, context)
-            return REG_CONFIRM
-
-    _, sacr = data.split(":", 1)
-    selected = context.user_data.get("reg_sacraments", [])
-    if sacr in selected:
-        selected.remove(sacr)
-    else:
-        if not selected and sacr in MARRIAGE_DIVORCE:
-            selected.append(sacr)
-        elif not selected:
-            selected.append(sacr)
-        else:
-            # se primo è matrimonio/divorzio, non si può aggiungere altro
-            if selected[0] in MARRIAGE_DIVORCE:
-                await query.answer(
-                    "Il matrimonio o il divorzio devono essere registrati da soli.",
-                    show_alert=True,
-                )
-                return REG_SACRAMENTS
-            selected.append(sacr)
-
-    context.user_data["reg_sacraments"] = selected
-    nickname = context.user_data.get("reg_nick", "Sconosciuto")
     text = (
         "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
         f"👤 Fedele: {nickname}\n\n"
         "✝️ Seleziona i sacramenti da registrare.\n"
         "Quando hai terminato, premi «Fine»."
     )
-    kb = sacrament_keyboard(selected)
-    await query.edit_message_text(text=text, reply_markup=kb)
-    return REG_SACRAMENTS
+    kb = sacrament_keyboard([])
 
-
-async def registra_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_priest(user.id):
-        return ConversationHandler.END
-
-    notes = update.message.text.strip()
-    if notes.lower() == "no":
-        notes = None
-    context.user_data["reg_notes"] = notes
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    await send_registra_summary(update, context)
-    return REG_CONFIRM
-
-
-async def send_registra_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    nickname = context.user_data.get("reg_nick", "Sconosciuto")
-    sacrs = context.user_data.get("reg_sacraments", [])
-    notes = context.user_data.get("reg_notes")
-
-    sacrs_str = ", ".join(sacrs) if sacrs else "Nessuno"
-    notes_str = notes if notes else "Nessuna nota."
-
-    text = (
-        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
-        "📜 Resoconto della registrazione:\n\n"
-        f"👤 Fedele: {nickname}\n"
-        f"✝️ Sacramenti: {sacrs_str}\n"
-        f"🕯 Note: {notes_str}\n\n"
-        "Confermi questa registrazione?"
-    )
-
-    kb = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Conferma", callback_data="reg_conf_yes"),
-                InlineKeyboardButton("❌ Annulla", callback_data="reg_conf_no"),
-            ]
-        ]
-    )
-
-    chat = update.effective_chat
-    reg_msg_id = context.user_data.get("reg_msg_id")
-    if isinstance(update, Update) and update.callback_query:
-        await update.callback_query.edit_message_text(text=text, reply_markup=kb)
-    elif reg_msg_id:
-        await chat.edit_message_text(
-            text=text, message_id=reg_msg_id, reply_markup=kb
+    if reg_msg_id:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=reg_msg_id,
+            text=text,
+            reply_markup=kb,
         )
     else:
-        msg = await chat.send_message(text, reply_markup=kb)
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+        )
         context.user_data["reg_msg_id"] = msg.message_id
 
-
-async def registra_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    if not is_priest(user.id):
-        return ConversationHandler.END
-
-    data = query.data
-    if data == "reg_conf_no":
-        await query.edit_message_text(
-            "🕯 La registrazione è stata annullata. Nessun sacramento è stato registrato."
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    nickname = context.user_data.get("reg_nick", "Sconosciuto")
-    sacrs = context.user_data.get("reg_sacraments", [])
-    notes = context.user_data.get("reg_notes")
-    priest_username = format_username(user)
-
-    sacrs_str = ", ".join(sacrs) if sacrs else "Nessuno"
-    notes_str = notes if notes else "Nessuna nota."
-
-    direction_text = (
-        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
-        "📜 Nuova registrazione di sacramento\n\n"
-        f"👤 Fedele: {nickname}\n"
-        f"✝️ Sacramenti: {sacrs_str}\n"
-        f"🕯 Note: {notes_str}\n"
-        f"🙏 Registrato da: {priest_username}"
-    )
-
-    direction_msg: Message | None = None
-    if DIRECTION_CHAT_ID != 0:
-        direction_msg = await query.get_bot().send_message(
-            chat_id=DIRECTION_CHAT_ID, text=direction_text
-        )
-
-    await save_sacrament(
-        faithful_nickname=nickname,
-        sacraments=sacrs,
-        notes=notes,
-        priest_id=user.id,
-        priest_username=user.username,
-        direction_chat_id=DIRECTION_CHAT_ID if DIRECTION_CHAT_ID != 0 else None,
-        direction_message_id=direction_msg.message_id if direction_msg else None,
-    )
-
-    await query.edit_message_text(
-        "🕯 La registrazione è stata confermata e inviata alla Direzione."
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
+    return REG_SACRAMENTS
 # ---------- /sessione ----------
 
 async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -515,6 +354,9 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat.id != STAFF_CHAT_ID:
         return
+
+    # Salva/aggiorna username del sacerdote
+    await upsert_priest(user)
 
     text = (
         "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
@@ -539,10 +381,9 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "priests": set(),
         "in_turn": set(),
         "waiting": set(),
-        "phase": "join",  # join / running
+        "phase": "join",
     }
 
-    # Timer 2 minuti
     context.job_queue.run_once(
         sessione_close_join_phase,
         when=120,
@@ -560,8 +401,8 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = session["chat_id"]
     priests = session["priests"]
-
     bot = context.bot
+
     if len(priests) < 3:
         text = (
             "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
@@ -576,7 +417,6 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
         del SESSIONS[message_id]
         return
 
-    # sorteggia 2 sacerdoti
     import random
 
     priests_list = list(priests)
@@ -590,7 +430,6 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
 
     await update_session_message(bot, session)
 
-    # avvia ciclo turni 30 minuti
     context.job_queue.run_repeating(
         sessione_next_turn,
         interval=30 * 60,
@@ -603,19 +442,14 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
 async def update_session_message(bot, session: Dict[str, Any]):
     chat_id = session["chat_id"]
     message_id = session["message_id"]
-    priests = session["priests"]
-    in_turn = session["in_turn"]
-    waiting = session["waiting"]
 
-    def fmt(uid):
-        return f"<a href=\"tg://user?id={uid}\">@{uid}</a>"
+    # Recupera i nomi veri dal DB
+    async def fmt(uid):
+        return await get_priest_name(uid)
 
-    # In pratica, per mostrare le @ reali, dovresti salvare username in memoria/DB.
-    # Qui per brevità usiamo solo l'id; tu puoi estendere salvando username.
-
-    in_turn_list = "\n".join([f"• Sacerdote {uid}" for uid in in_turn]) or "— Nessuno"
-    waiting_list = "\n".join([f"• Sacerdote {uid}" for uid in waiting]) or "— Nessuno"
-    all_list = "\n".join([f"• Sacerdote {uid}" for uid in priests]) or "— Nessuno"
+    in_turn_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["in_turn"]]) or "— Nessuno"
+    waiting_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["waiting"]]) or "— Nessuno"
+    all_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["priests"]]) or "— Nessuno"
 
     text = (
         "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
@@ -649,8 +483,11 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     user = update.effective_user
-    message_id = query.message.message_id
 
+    # Aggiorna @ del sacerdote
+    await upsert_priest(user)
+
+    message_id = query.message.message_id
     session = SESSIONS.get(message_id)
     if not session:
         await query.answer("Questa sessione non è più attiva.", show_alert=True)
@@ -663,10 +500,11 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
         session["priests"].discard(user.id)
         await query.answer("Hai abbandonato la sessione.")
 
-    # Aggiorna messaggio in fase join
     if session["phase"] == "join":
         priests = session["priests"]
-        priests_list = "\n".join([f"• Sacerdote {uid}" for uid in priests]) or "— Nessuno"
+        async def fmt(uid): return await get_priest_name(uid)
+        priests_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in priests]) or "— Nessuno"
+
         text = (
             "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
             "🕯 Apertura sessione turni sacerdotali.\n"
@@ -682,19 +520,22 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
                 ]
             ]
         )
-        await query.edit_message_text(text=text, reply_markup=kb)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+            reply_markup=kb,
+        )
     else:
-        # fase running: join/leave turni
         if query.data == "turn_join":
-            if user.id not in session["priests"]:
-                session["priests"].add(user.id)
+            session["priests"].add(user.id)
             if user.id not in session["in_turn"]:
                 session["waiting"].add(user.id)
             await query.answer("Ti sei messo in lista per i turni.")
+
         elif query.data == "turn_leave":
             if user.id in session["in_turn"]:
                 session["in_turn"].discard(user.id)
-                # rimpiazza con qualcuno in attesa
                 if session["waiting"]:
                     new_priest = session["waiting"].pop()
                     session["in_turn"].add(new_priest)
@@ -702,11 +543,11 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
                 session["waiting"].discard(user.id)
             await query.answer("Hai lasciato i turni.")
 
-        # Controlla se ci sono almeno 3 sacerdoti
         if len(session["priests"]) < 3:
-            # termina sessione
-            await query.edit_message_text(
-                "🕯 La sessione è terminata: non ci sono più almeno 3 sacerdoti."
+            await context.bot.edit_message_text(
+                chat_id=query.message.chat_id,
+                message_id=query.message.message_id,
+                text="🕯 La sessione è terminata: non ci sono più almeno 3 sacerdoti.",
             )
             del SESSIONS[message_id]
             return
@@ -722,9 +563,9 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
         context.job.schedule_removal()
         return
 
+    bot = context.bot
+
     if len(session["priests"]) < 3:
-        # termina sessione
-        bot = context.bot
         await bot.edit_message_text(
             chat_id=session["chat_id"],
             message_id=session["message_id"],
@@ -748,7 +589,6 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
     priests = list(session["priests"])
     random.shuffle(priests)
 
-    # Evita di ripetere gli stessi due del turno precedente se possibile
     prev_in_turn = session["in_turn"]
     candidates = [p for p in priests if p not in prev_in_turn]
     if len(candidates) < 2:
@@ -760,7 +600,7 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
     session["in_turn"] = new_in_turn
     session["waiting"] = waiting
 
-    await update_session_message(context.bot, session)
+    await update_session_message(bot, session)
 
 
 # ---------- /lista_sacramenti ----------
@@ -770,9 +610,9 @@ async def lista_sacramenti_start(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
 
     if not is_direction(user.id):
-        return
+        return ConversationHandler.END
     if chat.id != DIRECTION_CHAT_ID:
-        return
+        return ConversationHandler.END
 
     text = (
         "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
@@ -820,7 +660,12 @@ async def lista_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ],
             ]
         )
-        await query.edit_message_text(text, reply_markup=kb)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+            reply_markup=kb,
+        )
         return LIST_MAIN
 
     if data == "list_by_priest":
@@ -847,7 +692,12 @@ async def lista_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             "🕯 Seleziona un sacerdote per visualizzare le sue registrazioni.\n"
             "Le registrazioni saranno ordinate dalla più recente alla più antica."
         )
-        await query.edit_message_text(text, reply_markup=kb)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+            reply_markup=kb,
+        )
         return LIST_BY_PRIEST
 
     if data == "list_by_id":
@@ -855,7 +705,11 @@ async def lista_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             "🕯 Invia l'ID della registrazione che desideri consultare.\n"
             "Puoi tornare indietro in qualsiasi momento."
         )
-        await query.edit_message_text(text)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+        )
         return LIST_BY_ID
 
     if data == "list_by_faithful":
@@ -863,14 +717,18 @@ async def lista_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             "🕯 Invia il nome del fedele che desideri cercare.\n"
             "Le registrazioni saranno mostrate in ordine dalla più recente."
         )
-        await query.edit_message_text(text)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+        )
         return LIST_BY_FAITHFUL
 
 
 async def lista_priest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # list_priest:<id>:<page>
+    data = query.data
     _, priest_id_str, page_str = data.split(":")
     priest_id = int(priest_id_str)
     page = int(page_str)
@@ -889,7 +747,12 @@ async def lista_priest_callback(update: Update, context: ContextTypes.DEFAULT_TY
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🏛 Torna al pannello principale", callback_data="list_main")]]
         )
-        await query.edit_message_text(text, reply_markup=kb)
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=text,
+            reply_markup=kb,
+        )
         return LIST_BY_PRIEST
 
     lines = []
@@ -904,7 +767,12 @@ async def lista_priest_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     kb = list_pagination_keyboard(f"list_priest:{priest_id}", page, total_pages)
-    await query.edit_message_text(text, reply_markup=kb)
+    await context.bot.edit_message_text(
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id,
+        text=text,
+        reply_markup=kb,
+    )
     return LIST_BY_PRIEST
 
 
@@ -914,15 +782,15 @@ async def lista_by_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         sac_id = int(text)
     except ValueError:
         await update.message.reply_text("🕯 L'ID deve essere un numero. Riprova.")
-        return ConversationHandler.END
-
+        return LIST_BY_ID
 
     row = await fetch_sacrament_by_id(sac_id)
     if not row:
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata con questo ID."
         )
-        return ConversationHandler.END
+        return LIST_BY_ID
+
     msg = format_sacrament_record(row)
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🏛 Torna al pannello principale", callback_data="list_main")]]
@@ -945,8 +813,7 @@ async def lista_by_faithful_message(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata per questo fedele."
         )
-        return ConversationHandler.END
-
+        return LIST_BY_FAITHFUL
 
     lines = []
     for r in rows:
@@ -963,13 +830,13 @@ async def lista_by_faithful_message(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(text, reply_markup=kb)
     return LIST_BY_FAITHFUL
 
-
 async def lista_faithful_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # list_faithful:<page>
+    data = query.data
     _, page_str = data.split(":")
     page = int(page_str)
+
     faithful = context.user_data.get("list_faithful", "")
     if not faithful:
         await query.answer("Nessun fedele in memoria.", show_alert=True)
@@ -997,20 +864,29 @@ async def lista_faithful_pagination(update: Update, context: ContextTypes.DEFAUL
     )
 
     kb = list_pagination_keyboard("list_faithful", page, total_pages)
-    await query.edit_message_text(text, reply_markup=kb)
+    await context.bot.edit_message_text(
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id,
+        text=text,
+        reply_markup=kb,
+    )
     return LIST_BY_FAITHFUL
-
-
-# ---------- Report settimanale ----------
+# ---------- REPORT SETTIMANALE ----------
 
 async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
-    # Calcola settimana precedente (lunedì 00:00 -> lunedì 00:00)
     now = datetime.now(timezone.utc)
-    # Trova il lunedì corrente
-    weekday = now.weekday()  # 0 = lunedì
+    weekday = now.weekday()
+
     this_monday = datetime(
         year=now.year, month=now.month, day=now.day, tzinfo=timezone.utc
-    ) - timedelta(days=weekday, hours=now.hour, minutes=now.minute, seconds=now.second, microseconds=now.microsecond)
+    ) - timedelta(
+        days=weekday,
+        hours=now.hour,
+        minutes=now.minute,
+        seconds=now.second,
+        microseconds=now.microsecond,
+    )
+
     last_monday = this_monday - timedelta(days=7)
     start = last_monday
     end = this_monday
@@ -1029,21 +905,20 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(rows)
-
-    # Classifica sacerdoti
     priest_stats: Dict[str, Dict[str, int]] = {}
     sacrament_totals: Dict[str, int] = {}
 
     for r in rows:
         priest_username = r["priest_username"] or f"id {r['priest_telegram_id']}"
         sacrs = r["sacraments"]
+
         if priest_username not in priest_stats:
             priest_stats[priest_username] = {}
+
         for s in sacrs:
             priest_stats[priest_username][s] = priest_stats[priest_username].get(s, 0) + 1
             sacrament_totals[s] = sacrament_totals.get(s, 0) + 1
 
-    # Ordina sacerdoti per numero totale
     priest_order = sorted(
         priest_stats.items(),
         key=lambda kv: sum(kv[1].values()),
@@ -1059,7 +934,6 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
 
     for priest_username, sacrs_dict in priest_order:
         total_priest = sum(sacrs_dict.values())
-        # Dettaglio sacramenti
         detail_parts = []
         for s, c in sacrs_dict.items():
             if c == 1:
@@ -1073,14 +947,11 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
     for s, c in sacrament_totals.items():
         lines.append(f"- {s}: {c}")
 
-    # Prenotazioni ancora aperte: non hai definito un sistema di “prenotazioni aperte”,
-    # quindi qui metto 0 o puoi collegarlo a un'altra tabella.
     lines.append("\n📌 Prenotazioni ancora aperte: 0")
 
     text = "\n".join(lines)
     if DIRECTION_CHAT_ID != 0:
         await context.bot.send_message(DIRECTION_CHAT_ID, text)
-
 
 # ---------- MAIN ----------
 
@@ -1091,7 +962,7 @@ def main():
         .build()
     )
 
-    # /registra
+    # --- Conversazione /registra ---
     registra_conv = ConversationHandler(
         entry_points=[CommandHandler("registra", registra_start)],
         states={
@@ -1109,7 +980,7 @@ def main():
         persistent=False,
     )
 
-    # /sessione
+    # --- /sessione ---
     application.add_handler(CommandHandler("sessione", sessione_start))
     application.add_handler(
         CallbackQueryHandler(
@@ -1118,7 +989,7 @@ def main():
         )
     )
 
-    # /lista_sacramenti
+    # --- Conversazione /lista_sacramenti ---
     lista_conv = ConversationHandler(
         entry_points=[CommandHandler("lista_sacramenti", lista_sacramenti_start)],
         states={
@@ -1151,14 +1022,19 @@ def main():
     application.add_handler(registra_conv)
     application.add_handler(lista_conv)
 
-    # Job report settimanale
+    # ---------- JOB SETTIMANALE ----------
     now = datetime.now(timezone.utc)
     weekday = now.weekday()
     days_until_monday = (7 - weekday) % 7
+
     next_monday = datetime(
         year=now.year, month=now.month, day=now.day, tzinfo=timezone.utc
     ) + timedelta(days=days_until_monday)
-    next_monday_midnight = next_monday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    next_monday_midnight = next_monday.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
     if next_monday_midnight <= now:
         next_monday_midnight += timedelta(days=7)
 
@@ -1169,11 +1045,7 @@ def main():
         name="weekly_report",
     )
 
-    # -------------------------
-    # 🔥 AVVIO WEBHOOK PER RENDER
-    # -------------------------
-    import os
-
+    # ---------- WEBHOOK PER RENDER ----------
     port = int(os.environ.get("PORT", 10000))
     webhook_url = os.environ.get("WEBHOOK_URL")
 
@@ -1182,12 +1054,9 @@ def main():
         port=port,
         url_path=TOKEN,
         webhook_url=f"{webhook_url}/{TOKEN}",
-        allowed_updates=["message", "callback_query"]
+        allowed_updates=Update.ALL_TYPES,
     )
-
 
 
 if __name__ == "__main__":
     main()
-
-
