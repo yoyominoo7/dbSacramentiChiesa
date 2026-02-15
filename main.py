@@ -764,6 +764,7 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
         elif query.data == "turn_leave":
             if user.id in session["in_turn"]:
                 session["in_turn"].discard(user.id)
+                session["priests"].discard(user.id)
                 if session["waiting"]:
                     new_priest = session["waiting"].pop()
                     session["in_turn"].add(new_priest)
