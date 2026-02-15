@@ -1083,7 +1083,7 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 
-async def main():
+def main():
     application: Application = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -1150,8 +1150,7 @@ async def main():
     application.add_handler(registra_conv)
     application.add_handler(lista_conv)
 
-    # Job report settimanale: ogni lunedì alle 00:00 (UTC o tuo fuso)
-    # Qui lo imposto in UTC; se vuoi CEST, aggiusta con offset.
+    # Job report settimanale
     now = datetime.now(timezone.utc)
     weekday = now.weekday()
     days_until_monday = (7 - weekday) % 7
@@ -1169,10 +1168,10 @@ async def main():
         name="weekly_report",
     )
 
-    # Avvio in modalità webhook (adatta URL e porta)
-    # Per test locale puoi usare .run_polling()
-    await application.run_polling()
+    # Avvio del bot
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
