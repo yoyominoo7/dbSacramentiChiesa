@@ -344,6 +344,86 @@ async def registra_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["reg_msg_id"] = msg.message_id
 
     return REG_SACRAMENTS
+    
+async def registra_sacrament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+
+    if not is_priest(user.id):
+        return ConversationHandler.END
+
+    data = query.data
+
+    # --- Fine selezione sacramenti ---
+    if data == "sacr_fine":
+        selected = context.user_data.get("reg_sacraments", [])
+        if not selected:
+            await query.answer("Seleziona almeno un sacramento.", show_alert=True)
+            return REG_SACRAMENTS
+
+        # Matrimonio/divorzio → chiedi note
+        if selected[0] in MARRIAGE_DIVORCE:
+            text = (
+                "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
+                "🕯 Aggiungi eventuali note per questa registrazione.\n"
+                "Se non ci sono note, scrivi «no»."
+            )
+            await context.bot.edit_message_text(
+                chat_id=query.message.chat_id,
+                message_id=query.message.message_id,
+                text=text,
+            )
+            return REG_NOTES
+
+        # Nessuna nota → vai al riepilogo
+        context.user_data["reg_notes"] = None
+        await send_registra_summary(update, context)
+        return REG_CONFIRM
+
+    # --- Selezione sacramenti ---
+    _, sacr = data.split(":", 1)
+    selected = context.user_data.get("reg_sacraments", [])
+
+    # Toggle selezione
+    if sacr in selected:
+        selected.remove(sacr)
+    else:
+        # Regole matrimonio/divorzio
+        if not selected and sacr in MARRIAGE_DIVORCE:
+            selected.append(sacr)
+        elif not selected:
+            selected.append(sacr)
+        else:
+            if selected[0] in MARRIAGE_DIVORCE:
+                await query.answer(
+                    "Il matrimonio o il divorzio devono essere registrati da soli.",
+                    show_alert=True,
+                )
+                return REG_SACRAMENTS
+            selected.append(sacr)
+
+    context.user_data["reg_sacraments"] = selected
+
+    nickname = context.user_data.get("reg_nick", "Sconosciuto")
+    text = (
+        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
+        f"👤 Fedele: {nickname}\n\n"
+        "✝️ Seleziona i sacramenti da registrare.\n"
+        "Quando hai terminato, premi «Fine»."
+    )
+
+    kb = sacrament_keyboard(selected)
+
+    await context.bot.edit_message_text(
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id,
+        text=text,
+        reply_markup=kb,
+    )
+
+    return REG_SACRAMENTS
+
 # ---------- /sessione ----------
 
 async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -782,14 +862,14 @@ async def lista_by_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         sac_id = int(text)
     except ValueError:
         await update.message.reply_text("🕯 L'ID deve essere un numero. Riprova.")
-        return LIST_BY_ID
+        return ConversationHandler.END
 
     row = await fetch_sacrament_by_id(sac_id)
     if not row:
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata con questo ID."
         )
-        return LIST_BY_ID
+        return ConversationHandler.END
 
     msg = format_sacrament_record(row)
     kb = InlineKeyboardMarkup(
@@ -813,7 +893,7 @@ async def lista_by_faithful_message(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             "🕯 Nessuna registrazione trovata per questo fedele."
         )
-        return LIST_BY_FAITHFUL
+        return ConversationHandler.END
 
     lines = []
     for r in rows:
