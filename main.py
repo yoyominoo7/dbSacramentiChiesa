@@ -1182,7 +1182,9 @@ def main():
         port=port,
         url_path=TOKEN,
         webhook_url=f"{webhook_url}/{TOKEN}",
+        allowed_updates=["message", "callback_query"]
     )
+
 
 
 if __name__ == "__main__":
