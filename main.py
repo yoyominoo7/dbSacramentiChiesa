@@ -277,6 +277,38 @@ def list_pagination_keyboard(base_cb: str, page: int, total_pages: int):
     )
     return InlineKeyboardMarkup(buttons)
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Solo sacerdoti possono usare /start
+    if not is_priest(user.id):
+        await update.message.reply_text(
+            "🕯 Questo comando è riservato ai sacerdoti del Culto di Poseidone."
+        )
+        return
+
+    # Aggiorna o registra la @ del sacerdote
+    await upsert_priest(user)
+
+    text = (
+        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n"
+        "──────────────────────────────\n\n"
+        "🕯 **Sacerdote**, le acque ti accolgono.\n"
+        "Questo è il tuo libro dei comandi, affinché tu possa servire il Culto con ordine e chiarezza.\n\n"
+        "📜 **Comandi disponibili**\n\n"
+        "• **/registra**\n"
+        "   Avvia la liturgia di registrazione dei sacramenti.\n"
+        "   Ti guiderà passo dopo passo nella scelta del fedele, dei sacramenti e delle note.\n\n"
+        "• **/sessione**\n"
+        "   Apre una sessione sacerdotale per la gestione dei turni.\n"
+        "   I sacerdoti possono unirsi, abbandonare e partecipare ai turni attivi.\n"
+        "   Una sola sessione può essere attiva alla volta.\n\n"
+        "──────────────────────────────\n"
+        "⚓️ *Che le acque ti guidino, sacerdote.*"
+    )
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 # ---------- /registra ----------
 
 async def registra_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -574,7 +606,7 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.id != STAFF_CHAT_ID:
         return
 
-    # 🔥 CONTROLLO NUOVO: impedisce sessioni multiple
+    # 🔥 Impedisce sessioni multiple
     if any(SESSIONS.values()):
         await update.message.reply_text(
             "🕯 Una sessione sacerdotale è già attiva.\n"
@@ -582,9 +614,10 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Salva/aggiorna username del sacerdote
+    # Aggiorna @ del sacerdote
     await upsert_priest(user)
 
+    # Messaggio iniziale
     text = (
         "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
         "🕯 Apertura sessione turni sacerdotali.\n"
@@ -600,8 +633,10 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
     )
+
     msg = await chat.send_message(text, reply_markup=kb)
 
+    # 🔥 Sessione con nuovi campi
     SESSIONS[msg.message_id] = {
         "chat_id": chat.id,
         "message_id": msg.message_id,
@@ -609,8 +644,22 @@ async def sessione_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "in_turn": set(),
         "waiting": set(),
         "phase": "join",
+        "notifications": [],   # messaggi da cancellare alla fine
+        "cooldowns": {},       # cooldown anti-spam
     }
 
+    # 🔥 Notifica liturgica di apertura (salvata per cancellazione finale)
+    async def notify(text: str):
+        m = await context.bot.send_message(chat_id=chat.id, text=text)
+        SESSIONS[msg.message_id]["notifications"].append(m.message_id)
+
+    await notify(
+        "⚓️ **Le acque si aprono.**\n"
+        "🕯 La sessione sacerdotale è stata evocata.\n"
+        "I sacerdoti possono ora unirsi al cerchio."
+    )
+
+    # Timer di chiusura fase join
     context.job_queue.run_once(
         sessione_close_join_phase,
         when=120,
@@ -626,10 +675,11 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
     if not session:
         return
 
+    bot = context.bot
     chat_id = session["chat_id"]
     priests = session["priests"]
-    bot = context.bot
 
+    # --- Controllo minimo sacerdoti ---
     if len(priests) < 3:
         text = (
             "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
@@ -644,10 +694,11 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
         del SESSIONS[message_id]
         return
 
+    # --- Sorteggio iniziale ---
     import random
-
     priests_list = list(priests)
     random.shuffle(priests_list)
+
     in_turn = set(priests_list[:2])
     waiting = set(priests_list[2:])
 
@@ -655,8 +706,28 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
     session["waiting"] = waiting
     session["phase"] = "running"
 
+    # --- Funzione per notifiche ---
+    async def notify(text: str):
+        msg = await bot.send_message(chat_id=chat_id, text=text)
+        session["notifications"].append(msg.message_id)
+
+    # --- Notifica liturgica di inizio sessione ---
+    async def fmt(uid): return await get_priest_name(uid)
+
+    in_turn_list = "\n".join([f"• {await fmt(uid)}" for uid in in_turn])
+    waiting_list = "\n".join([f"• {await fmt(uid)}" for uid in waiting]) or "— Nessuno"
+
+    await notify(
+        "⚓️ **La sessione sacerdotale ha inizio.**\n\n"
+        "🕯 *Le acque si muovono e i primi sacerdoti entrano in turno.*\n\n"
+        f"⛵️ **Turno iniziale:**\n{in_turn_list}\n\n"
+        f"📜 **In attesa:**\n{waiting_list}"
+    )
+
+    # --- Aggiorna messaggio principale ---
     await update_session_message(bot, session)
 
+    # --- Avvia il ciclo dei turni ---
     context.job_queue.run_repeating(
         sessione_next_turn,
         interval=30 * 60,
@@ -664,6 +735,7 @@ async def sessione_close_join_phase(context: ContextTypes.DEFAULT_TYPE):
         data={"message_id": message_id},
         name=f"session_turn_{message_id}",
     )
+
 
 
 async def update_session_message(bot, session: Dict[str, Any]):
@@ -674,21 +746,35 @@ async def update_session_message(bot, session: Dict[str, Any]):
     async def fmt(uid):
         return await get_priest_name(uid)
 
-    in_turn_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["in_turn"]]) or "— Nessuno"
-    waiting_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["waiting"]]) or "— Nessuno"
-    all_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in session["priests"]]) or "— Nessuno"
+    # Liste formattate
+    in_turn_list = "\n".join(
+        [f"• {await fmt(uid)}" for uid in session["in_turn"]]
+    ) or "— Nessuno"
 
+    waiting_list = "\n".join(
+        [f"• {await fmt(uid)}" for uid in session["waiting"]]
+    ) or "— Nessuno"
+
+    all_list = "\n".join(
+        [f"• {await fmt(uid)}" for uid in session["priests"]]
+    ) or "— Nessuno"
+
+    # Testo liturgico aggiornato
     text = (
-        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n\n"
-        "🕯 Sessione turni sacerdotali attiva.\n\n"
-        "⏱ Turno corrente (30 minuti):\n"
+        "𝐂𝐔𝐋𝐓𝐎 𝐃𝐈 𝐏𝐎𝐒𝐄𝐈𝐃𝐎𝐍𝐄 ⚓️\n"
+        "──────────────────────────────\n\n"
+        "🕯 **Sessione sacerdotale attiva**\n"
+        "Le acque scorrono e i turni si susseguono.\n\n"
+        "⏱ **Turno corrente (30 minuti):**\n"
         f"{in_turn_list}\n\n"
-        "📜 In attesa di entrare in turno:\n"
+        "📜 **In attesa di entrare in turno:**\n"
         f"{waiting_list}\n\n"
-        "🙏 Sacerdoti in sessione:\n"
-        f"{all_list}"
+        "🙏 **Sacerdoti presenti nella sessione:**\n"
+        f"{all_list}\n"
+        "──────────────────────────────"
     )
 
+    # Pulsanti
     kb = InlineKeyboardMarkup(
         [
             [
@@ -698,11 +784,13 @@ async def update_session_message(bot, session: Dict[str, Any]):
         ]
     )
 
+    # Aggiornamento messaggio principale
     await bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
         text=text,
         reply_markup=kb,
+        parse_mode="Markdown",
     )
 
 
@@ -710,6 +798,7 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     user = update.effective_user
+    uid = user.id
 
     # Aggiorna @ del sacerdote
     await upsert_priest(user)
@@ -720,14 +809,34 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
         await query.answer("Questa sessione non è più attiva.", show_alert=True)
         return
 
-    if query.data == "sess_join":
-        session["priests"].add(user.id)
-        await query.answer("Ti sei unito alla sessione.")
-    elif query.data == "sess_leave":
-        session["priests"].discard(user.id)
-        await query.answer("Hai abbandonato la sessione.")
+    # --- COOLDOWN ANTI-SPAM (2 minuti) ---
+    now = datetime.now()
+    last = session["cooldowns"].get(uid)
+    if last and (now - last).total_seconds() < 120:
+        await query.answer("🕯 Attendi 2 minuti prima di cambiare stato.", show_alert=True)
+        return
+    session["cooldowns"][uid] = now
 
+    # Funzione per inviare notifiche e salvarle
+    async def notify(text: str):
+        msg = await context.bot.send_message(chat_id=session["chat_id"], text=text)
+        session["notifications"].append(msg.message_id)
+
+    # --- FASE DI JOIN (primi 2 minuti) ---
     if session["phase"] == "join":
+        if query.data == "sess_join":
+            if uid not in session["priests"]:
+                session["priests"].add(uid)
+                await notify(f"🕯 Il sacerdote {await get_priest_name(uid)} è entrato nella sessione.")
+            await query.answer("Ti sei unito alla sessione.")
+
+        elif query.data == "sess_leave":
+            if uid in session["priests"]:
+                session["priests"].discard(uid)
+                await notify(f"🕯 Il sacerdote {await get_priest_name(uid)} ha lasciato la sessione.")
+            await query.answer("Hai abbandonato la sessione.")
+
+        # Aggiorna messaggio principale
         priests = session["priests"]
         async def fmt(uid): return await get_priest_name(uid)
         priests_list = "\n".join([f"• Sacerdote {await fmt(uid)}" for uid in priests]) or "— Nessuno"
@@ -748,42 +857,69 @@ async def sessione_join_leave_callback(update: Update, context: ContextTypes.DEF
             ]
         )
         await context.bot.edit_message_text(
-            chat_id=query.message.chat_id,
-            message_id=query.message.message_id,
+            chat_id=session["chat_id"],
+            message_id=session["message_id"],
             text=text,
             reply_markup=kb,
         )
-    else:
-        if query.data == "turn_join":
-            session["priests"].add(user.id)
-            if user.id not in session["in_turn"]:
-                session["waiting"].add(user.id)
-                session["priests"].add(user.id)
-            await query.answer("Ti sei messo in lista per i turni.")
+        return
 
-        elif query.data == "turn_leave":
-            if user.id in session["in_turn"]:
-                session["in_turn"].discard(user.id)
-                session["priests"].discard(user.id)
-                if session["waiting"]:
-                    new_priest = session["waiting"].pop()
-                    session["in_turn"].add(new_priest)
-            if user.id in session["waiting"]:
-                session["waiting"].discard(user.id)
-                session["priests"].discard(user.id)
-            await query.answer("Hai lasciato i turni.")
+    # --- FASE DI SESSIONE ATTIVA ---
+    if query.data == "turn_join":
+        if uid not in session["priests"]:
+            session["priests"].add(uid)
+            session["waiting"].add(uid)
+            await notify(f"🕯 Il sacerdote {await get_priest_name(uid)} si è unito ai turni.")
+        await query.answer("Ti sei messo in lista per i turni.")
 
-        if len(session["priests"]) < 3:
-            await context.bot.edit_message_text(
-                chat_id=query.message.chat_id,
-                message_id=query.message.message_id,
-                text="🕯 La sessione è terminata: non ci sono più almeno 3 sacerdoti.",
-            )
-            del SESSIONS[message_id]
-            return
+    elif query.data == "turn_leave":
+        removed = False
 
-        await update_session_message(context.bot, session)
+        if uid in session["in_turn"]:
+            session["in_turn"].discard(uid)
+            removed = True
+            if session["waiting"]:
+                new_priest = session["waiting"].pop()
+                session["in_turn"].add(new_priest)
+                await notify(
+                    f"⚓️ Cambio turno:\n"
+                    f"• Esce {await get_priest_name(uid)}\n"
+                    f"• Entra {await get_priest_name(new_priest)}"
+                )
 
+        if uid in session["waiting"]:
+            session["waiting"].discard(uid)
+            removed = True
+
+        if uid in session["priests"]:
+            session["priests"].discard(uid)
+            removed = True
+
+        if removed:
+            await notify(f"🕯 Il sacerdote {await get_priest_name(uid)} ha lasciato i turni.")
+
+        await query.answer("Hai lasciato i turni.")
+
+    # --- CONTROLLO MINIMO SACERDOTI ---
+    if len(session["priests"]) < 3:
+        await context.bot.edit_message_text(
+            chat_id=session["chat_id"],
+            message_id=session["message_id"],
+            text="🕯 La sessione è terminata: non ci sono più almeno 3 sacerdoti.",
+        )
+
+        # 🔥 Cancella tutte le notifiche
+        for mid in session["notifications"]:
+            try:
+                await context.bot.delete_message(chat_id=session["chat_id"], message_id=mid)
+            except:
+                pass
+
+        del SESSIONS[message_id]
+        return
+
+    # Aggiorna messaggio principale
+    await update_session_message(context.bot, session)
 
 async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
@@ -795,6 +931,7 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
 
     bot = context.bot
 
+    # --- Controllo minimo sacerdoti ---
     if len(session["priests"]) < 3:
         await bot.edit_message_text(
             chat_id=session["chat_id"],
@@ -804,12 +941,22 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
                 "I messaggi relativi alla sessione verranno rimossi."
             ),
         )
+
+        # 🔥 Cancella tutte le notifiche
+        for mid in session["notifications"]:
+            try:
+                await bot.delete_message(chat_id=session["chat_id"], message_id=mid)
+            except:
+                pass
+
+        # Cancella messaggio principale
         try:
             await bot.delete_message(
                 chat_id=session["chat_id"], message_id=session["message_id"]
             )
-        except Exception:
+        except:
             pass
+
         del SESSIONS[message_id]
         context.job.schedule_removal()
         return
@@ -821,6 +968,7 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
 
     prev_in_turn = session["in_turn"]
     candidates = [p for p in priests if p not in prev_in_turn]
+
     if len(candidates) < 2:
         candidates = priests
 
@@ -830,8 +978,26 @@ async def sessione_next_turn(context: ContextTypes.DEFAULT_TYPE):
     session["in_turn"] = new_in_turn
     session["waiting"] = waiting
 
-    await update_session_message(bot, session)
+    # --- Notifica cambio turno ---
+    async def notify(text: str):
+        msg = await bot.send_message(chat_id=session["chat_id"], text=text)
+        session["notifications"].append(msg.message_id)
 
+    # Prepara testo liturgico del cambio turno
+    async def fmt(uid): return await get_priest_name(uid)
+
+    prev_list = "\n".join([f"• {await fmt(uid)}" for uid in prev_in_turn]) or "— Nessuno"
+    new_list = "\n".join([f"• {await fmt(uid)}" for uid in new_in_turn]) or "— Nessuno"
+
+    await notify(
+        "⚓️ **Aggiornamento dei Turni Sacerdotali**\n\n"
+        "🕯 *Le acque si muovono e il turno cambia...*\n\n"
+        f"⛵️ **Turno precedente:**\n{prev_list}\n\n"
+        f"🌊 **Nuovo turno:**\n{new_list}"
+    )
+
+    # Aggiorna messaggio principale
+    await update_session_message(bot, session)
 
 # ---------- /lista_sacramenti ----------
 
@@ -1184,13 +1350,15 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(DIRECTION_CHAT_ID, text)
 
 # ---------- MAIN ----------
-
 def main():
     application: Application = (
         ApplicationBuilder()
         .token(TOKEN)
         .build()
     )
+
+    # --- /start ---
+    application.add_handler(CommandHandler("start", start))
 
     # --- Conversazione /registra ---
     registra_conv = ConversationHandler(
@@ -1209,6 +1377,7 @@ def main():
         name="registra_conv",
         persistent=False,
     )
+    application.add_handler(registra_conv)
 
     # --- /sessione ---
     application.add_handler(CommandHandler("sessione", sessione_start))
@@ -1248,8 +1417,6 @@ def main():
         name="lista_sacramenti_conv",
         persistent=False,
     )
-
-    application.add_handler(registra_conv)
     application.add_handler(lista_conv)
 
     # ---------- JOB SETTIMANALE ----------
@@ -1286,7 +1453,6 @@ def main():
         webhook_url=f"{webhook_url}/{TOKEN}",
         allowed_updates=Update.ALL_TYPES,
     )
-
 
 if __name__ == "__main__":
     main()
